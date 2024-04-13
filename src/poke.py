@@ -96,16 +96,20 @@ def update_feed(feed_body, feed):
             logging.debug('%s: Skip %s publish time: %d, poke time: %d' %
                 (feed_title, item.title, publish_time, poke_time))
             continue
-        poke_time = publish_time
+
         if item.enclosures[0].type != 'audio/mpeg' and item.enclosures[0].type != 'audio/mp3':
             logging.error('%s: Invalid file type: %s, skiped.' % (feed_title, item.enclosures[0].type))
             continue
 
-        try:
-            r = requests.get(item.enclosures[0].href)
-        except Exception as e:
-            logging.error('%s: exception. url: %s, message: %s' % (feed_title, item.enclosures[0].href, e))
-            continue
+        for i in range(0, 5):
+            try:
+                r = requests.get(item.enclosures[0].href)
+            except Exception as e:
+                logging.error('%s: exception. url: %s, message: %s' % (feed_title, item.enclosures[0].href, e))
+                continue
+            break
+        if i==4:
+            break
         logging.info('%s: Download Complete: %s' % (feed_title, item.title))
 
         file_name = feed_title + time.strftime('-%Y-%m-%d %H-%M-%S', item.published_parsed)
@@ -114,6 +118,7 @@ def update_feed(feed_body, feed):
             os.makedirs(feed_path)
         with open(os.path.join(feed_path, file_name)+'.mp3', 'wb') as f:
             f.write(r.content)
+        poke_time = publish_time
 
         logging.info('%s: %s Complete.' % (feed_title, item.title))
     feed['poke_time'] = poke_time
