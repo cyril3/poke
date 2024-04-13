@@ -1,38 +1,29 @@
+#!/usr/bin/env python3
+
 import requests
 from feeds import Feeds
-from hurry.filesize import size as husize
 import argparse
 import feedparser
 import time
+import datetime
 import os
 import sys
 import io
-import config
-import configparser
+import logging
 
-feed_file = '.feed'
+poke_path = None
+feed_file = None
+log_path = None
 feeds = None
-conf = config.Config()
-# fetch feed and parse it using feedparser
-
 
 def fetch_feed(url):
-    try:
-        r = requests.get(url, timeout=5)
-    except Exception as e:
-        print(e)
-        return None
+    r = requests.get(url, timeout=5)
     if r.status_code != 200:
-        print("Error: status code %d." % r.status_code)
         return None
-    print("%s done." % husize(len(r.content)))
-
     d = feedparser.parse(r.text)
     return d
 
 # sub routine
-
-
 def poke_sub(args):
     # get subscribed feeds
     f = feeds.get_feeds()
@@ -41,6 +32,7 @@ def poke_sub(args):
         print('\'%s\' has already been subscribed to.' % args.url)
         return
     print("Checking for %s..." % args.url)
+
     d = fetch_feed(args.url)
     if d is None:
         print('Subscribe failed.')
@@ -51,7 +43,14 @@ def poke_sub(args):
         'update_time': int(time.mktime(d.feed.updated_parsed)),
         'link': d.feed.link,
         'description': d.feed.description,
+        'poke_time': 0,
     })
+
+    # the path to store the feed's download files
+    feed_path = os.path.join(poke_path, d.feed.title)
+    if not os.path.isdir(feed_path):
+        os.makedirs(feed_path)
+
     feeds.set_feeds(f)
     feeds.save()
     print('Subscribe successfully!')
@@ -62,8 +61,6 @@ def poke_sub(args):
     print()
 
 # list routine
-
-
 def poke_list(args):
     f = feeds.get_feeds()
     print("{0:<5}{1:<33}{2:<43}".format('No', 'title', 'description'))
@@ -76,8 +73,6 @@ def poke_list(args):
             i+1, f[i]['title'], f[i]['description']))
 
 # unsub routine
-
-
 def poke_unsub(args):
     f = feeds.get_feeds()
     index = int(args.index)
@@ -86,88 +81,90 @@ def poke_unsub(args):
     feeds.save()
     print('Unsubscribed to podcast %d.' % index)
 
-# update routine
+def update_feed(feed_body, feed):
+    feed_title = feed['title']
+    feed_path = os.path.join(poke_path, feed_title)
+    poke_time = feed['poke_time']
 
+    logging.info('%s: %d items are found.' % (feed_title, len(feed_body.entries)))
+    feed_body.entries.sort(key=lambda entry: entry.published_parsed)
 
-def poke_update(args):
-    f = feeds.get_feeds()
-    # for every feed
-    for feed in f:
-        # the path to store the feed's download files
-        feed_path = os.path.join(conf.feed_path, feed['title'])
-        if not os.path.isdir(feed_path):
-            os.mkdir(feed_path)
-
-        print('Updating \'%s\'...' % feed['title'])
-        print('Fetching feed \'%s\'... ' % feed['rss'], end='', flush=True)
-        d = fetch_feed(feed['rss'])
-        if d is None:
-            print('Get feed failed, skiped.')
+    for item in feed_body.entries:
+        logging.info('%s: Processing item: %s' % (feed_title, item.title))
+        publish_time = int(time.mktime(item.published_parsed))
+        if publish_time <= poke_time:
+            logging.debug('%s: Skip %s publish time: %d, poke time: %d' %
+                (feed_title, item.title, publish_time, poke_time))
             continue
-        print('%d items are found.' % len(d.entries))
-        # for every items of this feed
-        for item in d.entries:
-            print('Fetching \'%s\'...' % item.title)
-            # an item will be renamed to 'feed title + time', because some of podcast's item title can't be used to name a file
-            file_name = feed['title'] + \
-                time.strftime('-%Y-%m-%d %H-%M-%S', item.published_parsed)
-            if os.path.exists(os.path.join(feed_path, file_name)+'.txt'):
-                print('Already downloaded, skiped.')
-                continue
-            # for now we only support audio/mpeg and audio/mp3, we will deal with other types later.
-            if item.enclosures[0].type != 'audio/mpeg' and \
-                    item.enclosures[0].type != 'audio/mp3':
-                print('Invalid file type: %s, skiped.' %
-                      item.enclosures[0].type)
-                continue
-            # create an mp3 file for writing
-            with open(os.path.join(feed_path, file_name)+'.mp3', 'wb') as f:
-                try:
-                    with requests.get(item.enclosures[0].href, stream=True, timeout=5) as r:
-                        # get file length from response header
-                        total_length = r.headers.get('content-length')
-                        dl = 0  # how many bytes have been recieved
-                        done = 0  # how many '='s should be shown in the progress bar
-                        if total_length is None:
-                            print('Unknown file size.')
-                            print('Downloading \'%s\'...' % item.title)
-                            for chunk in r.iter_content(chunk_size=4096):
-                                dl += len(chunk)
-                                f.write(chunk)
-                                print('\r{1:<10} recieved'.format(
-                                    husize(dl), end=''))
-                        else:
-                            print('Downloading \'%s\'...' % item.title)
-                            print('\r[{0:<50}]'.format('='*done), end='')
-                            total_length = int(total_length)
-                            for chunk in r.iter_content(chunk_size=4096):
-                                dl += len(chunk)
-                                f.write(chunk)
-                                done = int(50 * dl / total_length)
-                                print('\r[{0:<50}] {1}/{2:<10}'.format('='*done,
-                                                                       husize(dl), husize(total_length)), end='')
-                except Exception as e:
-                    print(e)
-                    break
-            print()
-            print('Complete.')
-            # after download completely create a txt file the same name with the media file.
-            # check this file before the next time updating this item, we shall know if there is need to download it.
-            with open(os.path.join(feed_path, file_name)+'.txt', 'w') as f:
-                config = configparser.ConfigParser(interpolation=None)
-                config['item'] = {
-                    'title': item.title,
-                    'description': item.description,
-                    'link': item.link,
-                    'published': item.published,
-                    'file': item.enclosures[0]['href'],
-                }
-                config.write(f)
+        poke_time = publish_time
+        if item.enclosures[0].type != 'audio/mpeg' and item.enclosures[0].type != 'audio/mp3':
+            logging.error('%s: Invalid file type: %s, skiped.' % (feed_title, item.enclosures[0].type))
+            continue
 
+        try:
+            r = requests.get(item.enclosures[0].href)
+        except Exception as e:
+            logging.error('%s: exception. url: %s, message: %s' % (feed_title, item.enclosures[0].href, e))
+            continue
+        logging.info('%s: Download Complete: %s' % (feed_title, item.title))
+
+        file_name = feed_title + time.strftime('-%Y-%m-%d %H-%M-%S', item.published_parsed)
+
+        if not os.path.isdir(feed_path):
+            os.makedirs(feed_path)
+        with open(os.path.join(feed_path, file_name)+'.mp3', 'wb') as f:
+            f.write(r.content)
+
+        logging.info('%s: %s Complete.' % (feed_title, item.title))
+    feed['poke_time'] = poke_time
+
+# update routine
+def poke_update(args):
+    debug_level = logging.INFO
+    if args.debug:
+        debug_level = logging.DEBUG
+    logging.basicConfig(level       =debug_level,
+                        format      ="%(asctime)s %(name)s %(levelname)s %(message)s ",
+                        datefmt     ='%Y-%m-%d %H:%M:%S ',
+                        filename    = os.path.join(log_path, datetime.date.today().strftime("%Y-%m-%d") + '.log'),
+                        )
+    feed = feeds.get_feeds()
+    while True:
+        for handler in logging.root.handlers[:]:
+            logging.root.removeHandler(handler)
+        logging.basicConfig(level       =debug_level,
+                            format      ="%(asctime)s %(name)s %(levelname)s %(message)s ",
+                            datefmt     ='%Y-%m-%d %H:%M:%S ',
+                            filename    = os.path.join(log_path, datetime.date.today().strftime("%Y-%m-%d") + '.log'),
+                            )
+        logging.info('Poke update begin.')
+
+        for f in feed:
+            logging.info('%s: Updating' % f['title'])
+            logging.info('%s: Fetching %s' % (f['title'], f['rss']))
+            try:
+                d = fetch_feed(f['rss'])
+            except Exception as e:
+                logging.error('%s: fetch feed failed. %s' % (f['title'], e))
+                continue
+
+            update_feed(d, f)
+        feeds.set_feeds(feed)
+        feeds.save()
+        logging.info('Poke update ends.')
+        time.sleep(21600)
 
 if __name__ == "__main__":
 
-    conf.load()
+    poke_path_env = os.getenv('POKE_PATH')
+    if poke_path_env != None and poke_path_env != '':
+        poke_path = os.getenv('POKE_PATH')
+    else:
+        poke_path = os.path.join(os.path.expanduser('~'), 'poke')
+    feed_file = os.path.join(poke_path, '.feed')
+    log_path = os.path.join(poke_path, 'logs')
+    if not os.path.isdir(log_path):
+        os.makedirs(log_path)
 
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf8')
 
@@ -194,6 +191,9 @@ if __name__ == "__main__":
     parse_update = subparsers.add_parser(
         'update', aliases=['up'], help='Update postcasts.')
     parse_update.set_defaults(func=poke_update)
+
+    parse_update.add_argument("--debug", action="store_true",
+        help="run as debug mode.")
 
     args = parser.parse_args()
 
